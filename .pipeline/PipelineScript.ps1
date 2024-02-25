@@ -5,40 +5,56 @@ function Main()
 {
     # Parameters
     $wikiRepoRoot = "C:/Repos/pandoc.wiki"
-    $docRepoRoot = "C:/Repos/pandoc.docs"
-    $directories = @("Procedures")
+    $docRepoRoot = "C:/Repos/pandoc-test"
+    $monitoredDirectories = @("Procedures")
 
-    # Grab the commit from when the script last ran
-    $lastCommit = $(get-content "$docRepoRoot/.last_run")
 
-    # Populate $actions with what needs to be done to apply the wiki repo history to the docs repo
-    $actions = GetActions $wikiRepoRoot $directories $lastCommit
+    try {
+        # Grab the commit from when the script last ran
+        $lastCommit = $(get-content "$docRepoRoot/.pipeline/last_run")
 
-    # Delete any docx files whose corresponding wiki page was deleted
-    PerformDeletes $actions.Deletes
+        # Populate $actions with what needs to be done to apply the wiki repo history to the docs repo
+        $actions = GetActionsFromGitHistory $wikiRepoRoot $monitoredDirectories $lastCommit
 
-    # Rename/move any docx files that had their corresponding page renamed/moved
-    PerformRenames $actions.Renames
+        # Delete any docx files whose corresponding wiki page was deleted
+        PerformDeletes $actions.Deletes
 
-    # Create docx files for any new or modified wiki pages
-    PerformCreates $actions.Creates
+        # Rename/move any docx files that had their corresponding page renamed/moved
+        PerformRenames $actions.Renames
 
-    # Update the '.last_run' file with the current commit so we can use it
-    # during the next run as our starting point
-    #SetLastCommit $docRepoRoot
+        # Create docx files for any new or modified wiki pages
+        PerformCreates $actions.Creates
 
-    # Commit and push the new docx files + .last_run
-    #CommitAndPush $docRepoRoot
+        # Update the '.last_run' file with the current commit so we can use it
+        # during the next run as our starting point
+        SetLastCommit $wikiRepoRoot $docRepoRoot
+
+        # Commit and push the new docx files + .last_run
+        #CommitAndPush $docRepoRoot
+    }
+    catch {
+        <#Do this if a terminating exception happens#>
+    }
 }
 
-# Populates $deletes and $creates with file paths based on the git history since the last time
-# the script ran successfully
-function GetActions($wikiRepoRoot, $directories, $lastCommit)
+function CheckExitCode($exitCode, $errorMessage)
 {
-    $actions = [ScriptActionsStruct]::new()
+    if ($exitCode -ne 0)
+    {
+        throw "$errorMessage ($exitCode)"
+    }
+}
+
+function GetActionsFromGitHistory($wikiRepoRoot, $monitoredDirectories, $lastCommit)
+{
+    $actions = @{
+        Deletes = @()
+        Renames = @()
+        Creates = @()
+    }
 
     # Loop through each directory we are configured to monitor
-    foreach ($directory in $directories)
+    foreach ($directory in $monitoredDirectories)
     {
         PrintHeader "Processing '$directory'"
 
@@ -52,31 +68,35 @@ function GetActions($wikiRepoRoot, $directories, $lastCommit)
                 $actions.Creates += $mdFile.FullName
             }
             
-            #TODO:  Delete existing docx files?
+            #TODO:  Delete existing docx files and folders?
 
             continue
         }
 
+        # Get the Git diff history since the last commit
         # https://git-scm.com/docs/git-diff
         $diffOutput = $(git -C $wikiRepoRoot diff --diff-filter=ACDMR --name-status $lastCommit $directory*.md)
-    
-        $diffs = $diffOutput -split '\r?\n'
-    
-        foreach ($line in $diffs)
+        CheckExitCode $LASTEXITCODE "Git diff command failed"
+
+        # Loop through each line of the 'git diff' output
+        foreach ($line in ($diffOutput -split '\r?\n'))
         {
             PrintMessage $line
 
+            # Split each line on the tab character to get the fields
             $fields = $line -split '\t'
     
+            # Check for invalid field count
             if (($fields.Length -lt 2) -or ($fields.Length -gt 3))
             {
-                PrintError "Invalid diff output:  $line"
-                continue
+                throw "Invalid number of fields in 'git diff' output ($line)"
             }
             else
             {
+                # Snag the code from the first character of the line
                 $code = $fields[0].Substring(0, 1);
     
+                # Evaluate the code to determine the corresponding action we need to do
                 switch ($code)
                 {
                     "A" # Added
@@ -88,8 +108,7 @@ function GetActions($wikiRepoRoot, $directories, $lastCommit)
                     {
                         if ($fields.Length -ne 3)
                         {
-                            PrintError "Invalid diff output:  $line"
-                            continue
+                            throw "Invalid number of fields for a copy in 'git diff' output ($line)"
                         }
     
                         $actions.Creates += $fields[2]
@@ -109,19 +128,18 @@ function GetActions($wikiRepoRoot, $directories, $lastCommit)
                     {
                         if ($fields.Length -ne 3)
                         {
-                            PrintError "Invalid diff output:  $line"
-                            continue
+                            throw "Invalid number of fields for a rename in 'git diff' output ($line)"
                         }
                         
-                        $actions.Renames += [RenameStruct]::new($fields[1], $fields[2])
-    
-                        #$actions.Deletes += $fields[1]
-                        #$actions.Creates += $fields[2]
+                        $actions.Renames += @{
+                            Previous = $fields[1]
+                            New = $fields[2]
+                        }
                     }
     
                     default # Shouldn't ever get here...
                     {
-                        PrintError "Unknown diff code:  $line"
+                        throw "Unknow code in 'git diff' output ($line)"
                     }
                 }
             }
@@ -176,25 +194,6 @@ function PrintHeader($header)
 function PrintMessage($message)
 {
     Write-Host "  $message"
-}
-
-
-class RenameStruct
-{
-    [string]$Previous
-    [string]$New
-
-    RenameStruct($Previous, $New){
-        $this.Previous = $Previous
-        $this.New = $New
-    }
-}
-
-class ScriptActionsStruct
-{
-    [RenameStruct[]]$Renames
-    [string[]]$Deletes
-    [string[]]$Creates
 }
 
 
